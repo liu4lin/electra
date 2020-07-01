@@ -72,6 +72,7 @@ class PretrainingModel(object):
           masked_inputs, is_training, embedding_size=embedding_size)
       mlm_output = self._get_masked_lm_output(masked_inputs, generator)
     fake_data = self._get_fake_data(masked_inputs, mlm_output.logits)
+    fake_data = self._get_richer_data(fake_data)
     self.mlm_output = mlm_output
     self.total_loss = config.gen_weight * mlm_output.loss
 
@@ -196,16 +197,17 @@ class PretrainingModel(object):
           activation=modeling.get_activation(self._bert_config.hidden_act),
           kernel_initializer=modeling.create_initializer(
               self._bert_config.initializer_range))
-      logits = tf.squeeze(tf.layers.dense(hidden, units=1), -1)
+      logits = tf.layers.dense(hidden, units=4) #0: no_op, 1: sub, 2: ins, 3: del
       weights = tf.cast(inputs.input_mask, tf.float32)
-      labelsf = tf.cast(labels, tf.float32)
-      losses = tf.nn.sigmoid_cross_entropy_with_logits(
-          logits=logits, labels=labelsf) * weights
+      labels = tf.one_hot(labels, depth=4, dtype=tf.float32)#tf.cast(labels, tf.float32)
+      losses = tf.nn.softmax_cross_entropy_with_logits(
+          logits=logits, labels=labels) * weights
       per_example_loss = (tf.reduce_sum(losses, axis=-1) /
                           (1e-6 + tf.reduce_sum(weights, axis=-1)))
       loss = tf.reduce_sum(losses) / (1e-6 + tf.reduce_sum(weights))
-      probs = tf.nn.sigmoid(logits)
-      preds = tf.cast(tf.round((tf.sign(logits) + 1) / 2), tf.int32)
+      probs = tf.nn.softmax(logits, axis=-1)
+      #preds = tf.cast(tf.round((tf.sign(logits) + 1) / 2), tf.int32)
+      preds = tf.argmax(logits, axis=-1)
       DiscOutput = collections.namedtuple(
           "DiscOutput", ["loss", "per_example_loss", "probs", "preds",
                          "labels"])
@@ -233,6 +235,65 @@ class PretrainingModel(object):
         "inputs", "is_fake_tokens", "sampled_tokens"])
     return FakedData(inputs=updated_inputs, is_fake_tokens=labels,
                      sampled_tokens=sampled_tokens)
+
+  def _get_richer_data(self, fake_data):
+    inputs_tf = fake_data.inputs.input_ids
+    labels_tf = fake_data.is_fake_tokens
+    lens_tf = tf.reduce_sum(fake_data.inputs.input_mask, 1)
+    #retrieve the basic config
+    V = self._bert_config.vocab_size
+    N = self._config.max_predictions_per_seq * 2 #insertion and deletion
+    B, L = modeling.get_shape_list(inputs_tf) 
+    #make multiple partitions for edit op
+    splits_list = []
+    for i in range(B):
+      one = tf.random.uniform([N * 4], 1, lens_tf[i], tf.int32)
+      one, _ = tf.unique(one)
+      one = tf.cond(tf.less(tf.shape(one)[0], N * 2),
+                    lambda: tf.expand_dims(tf.range(N * 2)[1::2], 0),
+                    lambda: tf.sort(tf.reshape(one[: N * 2], [1, N * 2]))[:, ::2])
+      splits_list.append(one)
+    splits_tf = tf.concat(splits_list, 0)
+    splits_up = tf.concat([splits_tf, tf.expand_dims(tf.constant([L] * B, tf.int32), 1)], 1)
+    splits_lo = tf.concat([tf.expand_dims(tf.constant([0] * B, tf.int32), 1), splits_tf], 1)
+    size_splits = splits_up - splits_lo
+    #update the inputs and labels giving random insertion and deletion
+    new_labels_list = []
+    new_inputs_list = []
+    for i in range(B):
+      inputs_splits = tf.split(inputs_tf[i, :], size_splits[i, :])
+      labels_splits = tf.split(labels_tf[i, :], size_splits[i, :])
+      one_inputs = []
+      one_labels = []
+      size_split = len(inputs_splits)
+      for j in range(size_split):
+        inputs = inputs_splits[j]
+        labels = labels_splits[j] #label 1 for substistution
+        if j < size_split -1: #exclude the last split
+          if j % 2 == 0: #label 2 for insertion
+            labels = tf.concat([labels, tf.constant([2])], 0)
+            inputs = tf.concat([inputs, tf.random.uniform([1], 0, V, tf.int32)], 0)
+          else: #label 3 for deletion
+            labels = tf.concat([labels[:-2], tf.constant([3])], 0)
+            inputs = inputs[:-1]
+        one_labels.append(labels)
+        one_inputs.append(inputs)
+      one_inputs_tf = tf.concat(one_inputs, 0)
+      one_labels_tf = tf.concat(one_labels, 0)
+      one_inputs_tf = tf.cond(tf.less(lens_tf[i], N * 2), lambda: inputs_tf[i, :], lambda: one_inputs_tf)
+      one_labels_tf = tf.cond(tf.less(lens_tf[i], N * 2), lambda: labels_tf[i, :], lambda: one_labels_tf)
+      new_inputs_list.append(tf.expand_dims(one_inputs_tf, 0))
+      new_labels_list.append(tf.expand_dims(one_labels_tf, 0))
+
+    new_inputs_tf = tf.concat(new_inputs_list, 0)
+    new_labels_tf = tf.concat(new_labels_list, 0)
+    updated_inputs = pretrain_data.get_updated_inputs(
+        fake_data.inputs, input_ids=new_inputs_tf)
+    RicherData = collections.namedtuple("RicherData", [
+        "inputs", "is_fake_tokens", "sampled_tokens"])
+    return RicherData(inputs=updated_inputs, is_fake_tokens=new_labels_tf,
+                     sampled_tokens=fake_data.sampled_tokens)
+
 
   def _build_transformer(self, inputs: pretrain_data.Inputs, is_training,
                          bert_config=None, name="electra", reuse=False, **kwargs):
