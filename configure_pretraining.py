@@ -35,7 +35,7 @@ class PretrainingConfig(object):
     self.electra_objective = True  # if False, use the BERT objective instead
     self.gen_weight = 1.0  # masked language modeling / generator loss
     self.disc_weight = 50.0  # discriminator loss
-    self.mask_prob = 0.15  # percent of input tokens to mask out / replace
+    self.mask_prob = 0.05  # percent of input tokens to mask out / replace
 
     # optimization
     self.learning_rate = 5e-4
@@ -90,6 +90,7 @@ class PretrainingConfig(object):
     self.pretrain_tfrecords = os.path.join(
         data_dir, "pretrain_tfrecords/pretrain_data.tfrecord*")
     self.vocab_file = os.path.join(data_dir, "vocab.txt")
+    self.bilm_file = os.path.join(data_dir, "bilm.npy")
     self.model_dir = os.path.join(data_dir, "models", model_name)
     results_dir = os.path.join(self.model_dir, "results")
     self.results_txt = os.path.join(results_dir, "unsup_results.txt")

@@ -177,7 +177,7 @@ def mask(config: configure_pretraining.PretrainingConfig,
   masked_lm_positions *= tf.cast(masked_lm_weights, tf.int32)
 
   # Get the ids of the masked-out tokens
-  shift = tf.expand_dims(L * tf.range(B), -1)
+  shift = tf.expand_dims(L * tf.range(B), -1) #due to the flat operation
   flat_positions = tf.reshape(masked_lm_positions + shift, [-1, 1])
   masked_lm_ids = tf.gather_nd(tf.reshape(inputs.input_ids, [-1]),
                                flat_positions)
@@ -186,7 +186,7 @@ def mask(config: configure_pretraining.PretrainingConfig,
 
   # Update the input ids
   replace_with_mask_positions = masked_lm_positions * tf.cast(
-      tf.less(tf.random.uniform([B, N]), 0.85), tf.int32)
+      tf.less(tf.random.uniform([B, N]), 1 - mask_prob), tf.int32)
   inputs_ids, _ = scatter_update(
       inputs.input_ids, tf.fill([B, N], vocab["[MASK]"]),
       replace_with_mask_positions)

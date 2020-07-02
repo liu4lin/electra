@@ -21,6 +21,7 @@ import os
 import random
 import time
 import tensorflow.compat.v1 as tf
+import numpy as np
 
 from model import tokenization
 from util import utils
@@ -41,13 +42,16 @@ class ExampleBuilder(object):
     self._max_length = max_length
     self._target_length = max_length
 
-  def add_line(self, line):
+  def add_line(self, line, bilm=None):
     """Adds a line of text to the current example being built."""
     line = line.strip().replace("\n", " ")
     if (not line) and self._current_length != 0:  # empty lines separate docs
       return self._create_example()
     bert_tokens = self._tokenizer.tokenize(line)
     bert_tokids = self._tokenizer.convert_tokens_to_ids(bert_tokens)
+    if bilm is not None:
+      for i in range(len(bert_tokids)-1):
+        bilm[bert_tokids[i], bert_tokids[i+1]] += 1
     self._current_sentences.append(bert_tokids)
     self._current_length += len(bert_tokids)
     if self._current_length >= self._target_length:
@@ -126,6 +130,8 @@ class ExampleWriter(object):
         do_lower_case=do_lower_case)
     self._example_builder = ExampleBuilder(tokenizer, max_seq_length)
     self._writers = []
+    self._V = len(tokenizer.vocab)
+    self._bilm = np.zeros((self._V, self._V), dtype=int)
     for i in range(num_out_files):
       if i % num_jobs == job_id:
         output_fname = os.path.join(
@@ -140,7 +146,7 @@ class ExampleWriter(object):
       for line in f:
         line = line.strip()
         if line or self._blanks_separate_docs:
-          example = self._example_builder.add_line(line)
+          example = self._example_builder.add_line(line, self._bilm)
           if example:
             self._writers[self.n_written % len(self._writers)].write(
                 example.SerializeToString())
@@ -154,7 +160,7 @@ class ExampleWriter(object):
   def finish(self):
     for writer in self._writers:
       writer.close()
-
+    return self._bilm
 
 def write_examples(job_id, args):
   """A single process creating and writing out pre-processed examples."""

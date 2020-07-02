@@ -22,6 +22,8 @@ from __future__ import print_function
 import argparse
 import collections
 import json
+import random
+import numpy as np
 
 import tensorflow.compat.v1 as tf
 
@@ -72,7 +74,9 @@ class PretrainingModel(object):
           masked_inputs, is_training, embedding_size=embedding_size)
       mlm_output = self._get_masked_lm_output(masked_inputs, generator)
     fake_data = self._get_fake_data(masked_inputs, mlm_output.logits)
-    fake_data = self._get_richer_data(fake_data)
+    with open(self._config.bilm_file, 'rb') as f:
+      bilm = tf.constant(np.load(f), tf.int32)
+    fake_data = self._get_richer_data(fake_data, bilm)
     self.mlm_output = mlm_output
     self.total_loss = config.gen_weight * mlm_output.loss
 
@@ -236,23 +240,24 @@ class PretrainingModel(object):
     return FakedData(inputs=updated_inputs, is_fake_tokens=labels,
                      sampled_tokens=sampled_tokens)
 
-  def _get_richer_data(self, fake_data):
+  def _get_richer_data(self, fake_data, bilm):
     inputs_tf = fake_data.inputs.input_ids
     labels_tf = fake_data.is_fake_tokens
     lens_tf = tf.reduce_sum(fake_data.inputs.input_mask, 1)
     #retrieve the basic config
     V = self._bert_config.vocab_size
     N = self._config.max_predictions_per_seq * 2 #insertion and deletion
-    B, L = modeling.get_shape_list(inputs_tf) 
+    B, L = modeling.get_shape_list(inputs_tf)
+    _, nlms = modeling.get_shape_list(bilm)
     #make multiple partitions for edit op
     splits_list = []
     for i in range(B):
       one = tf.random.uniform([N * 4], 1, lens_tf[i], tf.int32)
       one, _ = tf.unique(one)
-      one = tf.cond(tf.less(tf.shape(one)[0], N * 2),
-                    lambda: tf.expand_dims(tf.range(N * 2)[1::2], 0),
-                    lambda: tf.sort(tf.reshape(one[: N * 2], [1, N * 2]))[:, ::2])
-      splits_list.append(one)
+      one = tf.cond(tf.less(tf.shape(one)[0], N * 2 + 1),
+                    lambda: tf.expand_dims(tf.range(1, N * 2 + 2), 0),
+                    lambda: tf.sort(tf.reshape(one[: N * 2 + 1], [1, N * 2 + 1])))
+      splits_list.append(one[:, 2::2])
     splits_tf = tf.concat(splits_list, 0)
     splits_up = tf.concat([splits_tf, tf.expand_dims(tf.constant([L] * B, tf.int32), 1)], 1)
     splits_lo = tf.concat([tf.expand_dims(tf.constant([0] * B, tf.int32), 1), splits_tf], 1)
@@ -266,13 +271,16 @@ class PretrainingModel(object):
       one_inputs = []
       one_labels = []
       size_split = len(inputs_splits)
+      rand_check = random.randint(0, 1)
       for j in range(size_split):
         inputs = inputs_splits[j]
         labels = labels_splits[j] #label 1 for substistution
+        rand_chose = random.randint(0, nlms-1)
         if j < size_split -1: #exclude the last split
-          if j % 2 == 0: #label 2 for insertion
+          if j % 2 == rand_check: #label 2 for insertion
             labels = tf.concat([labels, tf.constant([2])], 0)
-            inputs = tf.concat([inputs, tf.random.uniform([1], 0, V, tf.int32)], 0)
+            #inputs = tf.concat([inputs, tf.random.uniform([1], 0, V, tf.int32)], 0)
+            inputs = tf.concat([inputs, tf.expand_dims(bilm[inputs[-1], rand_chose], 0)], 0)
           else: #label 3 for deletion
             labels = tf.concat([labels[:-2], tf.constant([3])], 0)
             inputs = inputs[:-1]
@@ -280,8 +288,8 @@ class PretrainingModel(object):
         one_inputs.append(inputs)
       one_inputs_tf = tf.concat(one_inputs, 0)
       one_labels_tf = tf.concat(one_labels, 0)
-      one_inputs_tf = tf.cond(tf.less(lens_tf[i], N * 2), lambda: inputs_tf[i, :], lambda: one_inputs_tf)
-      one_labels_tf = tf.cond(tf.less(lens_tf[i], N * 2), lambda: labels_tf[i, :], lambda: one_labels_tf)
+      one_inputs_tf = tf.cond(tf.less(lens_tf[i], N * 2 + 1), lambda: inputs_tf[i, :], lambda: one_inputs_tf)
+      one_labels_tf = tf.cond(tf.less(lens_tf[i], N * 2 + 1), lambda: labels_tf[i, :], lambda: one_labels_tf)
       new_inputs_list.append(tf.expand_dims(one_inputs_tf, 0))
       new_labels_list.append(tf.expand_dims(one_labels_tf, 0))
 

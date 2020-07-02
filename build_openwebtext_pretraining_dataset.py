@@ -22,12 +22,12 @@ import random
 import tarfile
 import time
 import tensorflow.compat.v1 as tf
+import numpy as np
 
 import build_pretraining_dataset
 from util import utils
 
-
-def write_examples(job_id, args):
+def write_examples(job_id, args, bilm_list):
   """A single process creating and writing out pre-processed examples."""
   job_tmp_dir = os.path.join(args.data_dir, "tmp", "job_" + str(job_id))
   owt_dir = os.path.join(args.data_dir, "openwebtext")
@@ -67,9 +67,10 @@ def write_examples(job_id, args):
     random.shuffle(extracted_files)
     for txt_fname in extracted_files:
       example_writer.write_examples(os.path.join(job_tmp_dir, txt_fname))
-  example_writer.finish()
+  _bilm = example_writer.finish()
+  bilm = np.vstack(np.argmax(_bilm, axis=1)) #keep the most probable next word
+  bilm_list.append(bilm)
   log("Done!")
-
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
@@ -87,17 +88,24 @@ def main():
   args = parser.parse_args()
 
   utils.rmkdir(os.path.join(args.data_dir, "pretrain_tfrecords"))
+  manager = multiprocessing.Manager()
+  bilm_list = manager.list()
   if args.num_processes == 1:
-    write_examples(0, args)
+    write_examples(0, args, bilm_list)
   else:
     jobs = []
     for i in range(args.num_processes):
-      job = multiprocessing.Process(target=write_examples, args=(i, args))
+      job = multiprocessing.Process(target=write_examples, args=(i, args, bilm_list))
       jobs.append(job)
       job.start()
     for job in jobs:
       job.join()
-
+  bilm = None
+  for _bilm in bilm_list:
+    bilm = _bilm if bilm is None else np.concatenate((bilm, _bilm), 1)
+  bilm_file = os.path.join(args.data_dir, "bilm.npy")
+  with open(bilm_file, 'wb') as f:
+    np.save(f, bilm)
 
 if __name__ == "__main__":
   main()
