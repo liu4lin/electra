@@ -76,7 +76,7 @@ class PretrainingModel(object):
     fake_data = self._get_fake_data(masked_inputs, mlm_output.logits)
     with open(self._config.bilm_file, 'rb') as f:
       bilm = tf.constant(np.load(f), tf.int32)
-    fake_data = self._get_richer_data(fake_data, bilm)
+    fake_data = self._get_richer_data(fake_data, None)
     self.mlm_output = mlm_output
     self.total_loss = config.gen_weight * mlm_output.loss
 
@@ -248,7 +248,9 @@ class PretrainingModel(object):
     V = self._bert_config.vocab_size
     N = self._config.max_predictions_per_seq * 2 #insertion and deletion
     B, L = modeling.get_shape_list(inputs_tf)
-    _, nlms = modeling.get_shape_list(bilm)
+    nlms = 0
+    if bilm is not None:
+      _, nlms = modeling.get_shape_list(bilm)
     #make multiple partitions for edit op
     splits_list = []
     for i in range(B):
@@ -271,21 +273,30 @@ class PretrainingModel(object):
       one_inputs = []
       one_labels = []
       size_split = len(inputs_splits)
-      rand_check = random.randint(0, 1)
-      for j in range(size_split):
+      inputs_end = inputs_splits[-1]
+      labels_end = labels_splits[-1]
+      for j in range(size_split-1):
         inputs = inputs_splits[j]
         labels = labels_splits[j] #label 1 for substistution
-        rand_chose = random.randint(0, nlms-1)
-        if j < size_split -1: #exclude the last split
-          if j % 2 == rand_check: #label 2 for insertion
-            labels = tf.concat([labels, tf.constant([2])], 0)
-            #inputs = tf.concat([inputs, tf.random.uniform([1], 0, V, tf.int32)], 0)
-            inputs = tf.concat([inputs, tf.expand_dims(bilm[inputs[-1], rand_chose], 0)], 0)
-          else: #label 3 for deletion
-            labels = tf.concat([labels[:-2], tf.constant([3])], 0)
-            inputs = inputs[:-1]
+        if random.randint(0, 1) == 0: #label 2 for insertion
+          if bilm is None: #noise
+            insert_tok = tf.random.uniform([1], 1, V, tf.int32)
+          else: #2-gram prediction
+            insert_tok = tf.expand_dims(bilm[inputs[-1], random.randint(0, nlms-1)], 0)
+          is_end_valid = tf.less_equal(2, tf.shape(inputs_end)[0])
+          inputs = tf.cond(is_end_valid, lambda: tf.concat([inputs, insert_tok], 0), lambda: inputs)
+          labels = tf.cond(is_end_valid, lambda: tf.concat([labels, tf.constant([2])], 0), lambda: labels)
+          inputs_end = tf.cond(is_end_valid, lambda: inputs_end[:-1], lambda: inputs_end)
+          labels_end = tf.cond(is_end_valid, lambda: labels_end[:-1], lambda: labels_end)
+        else: #label 3 for deletion
+          labels = tf.concat([labels[:-2], tf.constant([3])], 0)
+          inputs = inputs[:-1]
+          inputs_end = tf.concat([inputs_end, tf.constant([0])], 0)
+          labels_end = tf.concat([labels_end, tf.constant([0])], 0) 
         one_labels.append(labels)
         one_inputs.append(inputs)
+      one_inputs.append(inputs_end)
+      one_labels.append(labels_end)
       one_inputs_tf = tf.concat(one_inputs, 0)
       one_labels_tf = tf.concat(one_labels, 0)
       one_inputs_tf = tf.cond(tf.less(lens_tf[i], N * 2 + 1), lambda: inputs_tf[i, :], lambda: one_inputs_tf)
@@ -295,8 +306,9 @@ class PretrainingModel(object):
 
     new_inputs_tf = tf.concat(new_inputs_list, 0)
     new_labels_tf = tf.concat(new_labels_list, 0)
+    new_input_mask = tf.cast(tf.not_equal(new_inputs_tf, 0), tf.int32)
     updated_inputs = pretrain_data.get_updated_inputs(
-        fake_data.inputs, input_ids=new_inputs_tf)
+        fake_data.inputs, input_ids=new_inputs_tf, input_mask=new_input_mask)
     RicherData = collections.namedtuple("RicherData", [
         "inputs", "is_fake_tokens", "sampled_tokens"])
     return RicherData(inputs=updated_inputs, is_fake_tokens=new_labels_tf,
