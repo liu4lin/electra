@@ -201,9 +201,10 @@ class PretrainingModel(object):
           activation=modeling.get_activation(self._bert_config.hidden_act),
           kernel_initializer=modeling.create_initializer(
               self._bert_config.initializer_range))
-      logits = tf.layers.dense(hidden, units=4) #0: no_op, 1: sub, 2: ins, 3: del
+      num_labels = 4 #tf.reduce_max(labels) + 1 #0: no_op, 1: sub, 2: ins, 3: del, [4:swap]
+      logits = tf.layers.dense(hidden, units=num_labels) 
       weights = tf.cast(inputs.input_mask, tf.float32)
-      labels = tf.one_hot(labels, depth=4, dtype=tf.float32)#tf.cast(labels, tf.float32)
+      labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)#tf.cast(labels, tf.float32)
       losses = tf.nn.softmax_cross_entropy_with_logits(
           logits=logits, labels=labels) * weights
       per_example_loss = (tf.reduce_sum(losses, axis=-1) /
@@ -246,7 +247,8 @@ class PretrainingModel(object):
     lens_tf = tf.reduce_sum(fake_data.inputs.input_mask, 1)
     #retrieve the basic config
     V = self._bert_config.vocab_size
-    N = self._config.max_predictions_per_seq * 2 #insertion and deletion
+    #sub: 10%, del + ins: 5%
+    N = int(self._config.max_predictions_per_seq * 0.5)
     B, L = modeling.get_shape_list(inputs_tf)
     nlms = 0
     if bilm is not None:
@@ -278,7 +280,8 @@ class PretrainingModel(object):
       for j in range(size_split-1):
         inputs = inputs_splits[j]
         labels = labels_splits[j] #label 1 for substistution
-        if random.randint(0, 1) == 0: #label 2 for insertion
+        rand_op = random.randint(0, 1) #using [0, 2] to enable swapping
+        if rand_op == 0: #label 2 for insertion
           if bilm is None: #noise
             insert_tok = tf.random.uniform([1], 1, V, tf.int32)
           else: #2-gram prediction
@@ -288,11 +291,14 @@ class PretrainingModel(object):
           labels = tf.cond(is_end_valid, lambda: tf.concat([labels, tf.constant([2])], 0), lambda: labels)
           inputs_end = tf.cond(is_end_valid, lambda: inputs_end[:-1], lambda: inputs_end)
           labels_end = tf.cond(is_end_valid, lambda: labels_end[:-1], lambda: labels_end)
-        else: #label 3 for deletion
+        elif rand_op == 1: #label 3 for deletion
           labels = tf.concat([labels[:-2], tf.constant([3])], 0)
           inputs = inputs[:-1]
           inputs_end = tf.concat([inputs_end, tf.constant([0])], 0)
-          labels_end = tf.concat([labels_end, tf.constant([0])], 0) 
+          labels_end = tf.concat([labels_end, tf.constant([0])], 0)
+        else: #label 4 for swapping
+          labels = tf.concat([labels[:-1], tf.constant([4])], 0)
+          inputs = tf.concat([inputs[:-2], [inputs[-1]], [inputs[-2]]], 0)
         one_labels.append(labels)
         one_inputs.append(inputs)
       one_inputs.append(inputs_end)

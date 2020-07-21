@@ -35,7 +35,7 @@ class PretrainingConfig(object):
     self.electra_objective = True  # if False, use the BERT objective instead
     self.gen_weight = 1.0  # masked language modeling / generator loss
     self.disc_weight = 50.0  # discriminator loss
-    self.mask_prob = 0.05  # percent of input tokens to mask out / replace
+    self.mask_prob = 0.1  # percent of input tokens to mask out / replace
 
     # optimization
     self.learning_rate = 5e-4
