@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-
+import tensorflow as tf
 
 class PretrainingConfig(object):
   """Defines pre-training hyperparameters."""
@@ -36,6 +36,9 @@ class PretrainingConfig(object):
     self.gen_weight = 1.0  # masked language modeling / generator loss
     self.disc_weight = 50.0  # discriminator loss
     self.mask_prob = 0.1  # percent of input tokens to mask out / replace
+    self.rich_prob = 0.5  # percent of richer corruptions(ins/del/swap) relative to replace
+    self.num_preds = 4    # number of predictions, 0: no_op, 1: sub, 2: ins, 3: del, [4:swap]
+    self.use_bilm = False # use bi-lm as the predictor of random insertion
 
     # optimization
     self.learning_rate = 5e-4
@@ -96,6 +99,9 @@ class PretrainingConfig(object):
     self.results_txt = os.path.join(results_dir, "unsup_results.txt")
     self.results_pkl = os.path.join(results_dir, "unsup_results.pkl")
 
+    if not tf.io.gfile.exists(self.bilm_file):
+      self.use_bilm = False
+    
     # update defaults with passed-in hyperparameters
     self.update(kwargs)
 

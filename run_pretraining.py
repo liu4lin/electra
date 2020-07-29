@@ -74,9 +74,7 @@ class PretrainingModel(object):
           masked_inputs, is_training, embedding_size=embedding_size)
       mlm_output = self._get_masked_lm_output(masked_inputs, generator)
     fake_data = self._get_fake_data(masked_inputs, mlm_output.logits)
-    with open(self._config.bilm_file, 'rb') as f:
-      bilm = tf.constant(np.load(f), tf.int32)
-    fake_data = self._get_richer_data(fake_data, None)
+    fake_data = self._get_richer_data(fake_data)
     self.mlm_output = mlm_output
     self.total_loss = config.gen_weight * mlm_output.loss
 
@@ -201,7 +199,7 @@ class PretrainingModel(object):
           activation=modeling.get_activation(self._bert_config.hidden_act),
           kernel_initializer=modeling.create_initializer(
               self._bert_config.initializer_range))
-      num_labels = 4 #tf.reduce_max(labels) + 1 #0: no_op, 1: sub, 2: ins, 3: del, [4:swap]
+      num_labels = self._config.num_preds #tf.reduce_max(labels) + 1 
       logits = tf.layers.dense(hidden, units=num_labels) 
       weights = tf.cast(inputs.input_mask, tf.float32)
       labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)#tf.cast(labels, tf.float32)
@@ -241,17 +239,20 @@ class PretrainingModel(object):
     return FakedData(inputs=updated_inputs, is_fake_tokens=labels,
                      sampled_tokens=sampled_tokens)
 
-  def _get_richer_data(self, fake_data, bilm):
+  def _get_richer_data(self, fake_data):
     inputs_tf = fake_data.inputs.input_ids
     labels_tf = fake_data.is_fake_tokens
     lens_tf = tf.reduce_sum(fake_data.inputs.input_mask, 1)
     #retrieve the basic config
     V = self._bert_config.vocab_size
     #sub: 10%, del + ins: 5%
-    N = int(self._config.max_predictions_per_seq * 0.5)
+    N = int(self._config.max_predictions_per_seq * self._config.rich_prob)
     B, L = modeling.get_shape_list(inputs_tf)
     nlms = 0
-    if bilm is not None:
+    bilm = None
+    if self._config.use_bilm:
+      with open(self._config.bilm_file, 'rb') as f:
+        bilm = tf.constant(np.load(f), tf.int32)
       _, nlms = modeling.get_shape_list(bilm)
     #make multiple partitions for edit op
     splits_list = []
@@ -280,8 +281,8 @@ class PretrainingModel(object):
       for j in range(size_split-1):
         inputs = inputs_splits[j]
         labels = labels_splits[j] #label 1 for substistution
-        rand_op = random.randint(0, 1) #using [0, 2] to enable swapping
-        if rand_op == 0: #label 2 for insertion
+        rand_op = random.randint(2, self._config.num_preds - 1) 
+        if rand_op == 2: #label 2 for insertion
           if bilm is None: #noise
             insert_tok = tf.random.uniform([1], 1, V, tf.int32)
           else: #2-gram prediction
@@ -291,12 +292,12 @@ class PretrainingModel(object):
           labels = tf.cond(is_end_valid, lambda: tf.concat([labels, tf.constant([2])], 0), lambda: labels)
           inputs_end = tf.cond(is_end_valid, lambda: inputs_end[:-1], lambda: inputs_end)
           labels_end = tf.cond(is_end_valid, lambda: labels_end[:-1], lambda: labels_end)
-        elif rand_op == 1: #label 3 for deletion
+        elif rand_op == 3: #label 3 for deletion
           labels = tf.concat([labels[:-2], tf.constant([3])], 0)
           inputs = inputs[:-1]
           inputs_end = tf.concat([inputs_end, tf.constant([0])], 0)
           labels_end = tf.concat([labels_end, tf.constant([0])], 0)
-        else: #label 4 for swapping
+        elif rand_op == 4: #label 4 for swapping
           labels = tf.concat([labels[:-1], tf.constant([4])], 0)
           inputs = tf.concat([inputs[:-2], [inputs[-1]], [inputs[-2]]], 0)
         one_labels.append(labels)
